@@ -42,7 +42,7 @@ class HeadsetButtonReceiver : BroadcastReceiver() {
 
         fun startHandsFree(context: Context) {
             val intent = Intent(context, AssistantService::class.java)
-                .setAction(AssistantService.ACTION_START_HANDS_FREE)
+                .setAction(AssistantService.ACTION_HEADSET_BUTTON)
             ContextCompat.startForegroundService(context, intent)
         }
     }

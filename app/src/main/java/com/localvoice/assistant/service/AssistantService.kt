@@ -94,6 +94,7 @@ class AssistantService : Service() {
         private const val NOTIFICATION_ID = 101
         private const val PREF_LLM_PATH = "llm_path"
         const val ACTION_START_HANDS_FREE = "com.localvoice.assistant.START_HANDS_FREE"
+        const val ACTION_HEADSET_BUTTON = "com.localvoice.assistant.HEADSET_BUTTON"
         private val ANSWER_WORD_REGEX = Regex("\\S+")
     }
 
@@ -235,9 +236,9 @@ class AssistantService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         takeMediaButtonPriority()
-        if (intent?.action == ACTION_START_HANDS_FREE) {
+        if (intent?.action == ACTION_START_HANDS_FREE || intent?.action == ACTION_HEADSET_BUTTON) {
             promoteToMicrophoneForeground()
-            startHandsFree()
+            onHeadsetButtonPressed()
         }
         return START_STICKY
     }
@@ -471,6 +472,35 @@ class AssistantService : Service() {
         }
     }
 
+    fun onHeadsetButtonPressed() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastHeadsetTriggerMs < 1_000) return
+        lastHeadsetTriggerMs = now
+
+        val state = _uiState.value
+        if (state.isGenerating || state.isSpeaking) {
+            handleBargeIn()
+            if (!state.handsFree) return
+        }
+        if (state.handsFree) {
+            setHandsFree(false)
+            return
+        }
+        if (state.listeningState != ListeningState.IDLE) {
+            audioPipeline.requestManualFinish()
+            return
+        }
+
+        serviceScope.launch {
+            var waitedMs = 0
+            while (!audioPipeline.modelsReady && waitedMs < 10_000) {
+                delay(100)
+                waitedMs += 100
+            }
+            setHandsFree(true)
+        }
+    }
+
     fun startHandsFree() {
         val now = SystemClock.elapsedRealtime()
         val state = _uiState.value
@@ -652,9 +682,15 @@ class AssistantService : Service() {
 
             when (val parsed = ToolParser.parse(result.text, text)) {
                 is ModelOutput.Reply -> {
-                    val replyText = parsed.text.ifEmpty { "Okay." }
+                    val usedFallback = parsed.text.isEmpty()
+                    val replyText = if (usedFallback) "Okay." else parsed.text
                     _uiState.update { it.copy(assistantText = replyText) }
-                    ttsPlayer.finishStream()
+                    if (usedFallback) {
+                        ttsPlayer.stop()
+                        ttsPlayer.speakImmediate(serviceScope, replyText)
+                    } else {
+                        ttsPlayer.finishStream()
+                    }
                 }
                 is ModelOutput.Call -> {
                     ttsPlayer.stop()
@@ -699,15 +735,16 @@ class AssistantService : Service() {
 
     private fun takeMediaButtonPriority() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                .setAudioAttributes(attributes)
-                .setOnAudioFocusChangeListener { }
-                .build()
-            audioFocusRequest = request
+            val request = audioFocusRequest ?: run {
+                val attributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(attributes)
+                    .setOnAudioFocusChangeListener { }
+                    .build().also { audioFocusRequest = it }
+            }
             audioManager.requestAudioFocus(request)
         }
         mediaSession.isActive = true

@@ -90,18 +90,25 @@ class MainActivity : ComponentActivity() {
                             if (uri != null) service.loadLlmFromUri(uri)
                         }
 
+                        var launchedPermissionName by remember { mutableStateOf<String?>(null) }
                         val permissionLauncher = rememberLauncherForActivityResult(
                             ActivityResultContracts.RequestPermission()
                         ) { granted ->
-                            val perm = pendingPermissionName ?: return@rememberLauncherForActivityResult
+                            val perm = pendingPermissionName ?: launchedPermissionName
+                                ?: return@rememberLauncherForActivityResult
                             pendingPermissionName = null
+                            launchedPermissionName = null
                             service.onPermissionResult(perm, granted)
                         }
 
                         LaunchedEffect(state.permissionRequest) {
-                            val perm = state.permissionRequest ?: return@LaunchedEffect
+                            val perm = state.permissionRequest ?: run {
+                                launchedPermissionName = null
+                                return@LaunchedEffect
+                            }
+                            if (perm == launchedPermissionName) return@LaunchedEffect
+                            launchedPermissionName = perm
                             pendingPermissionName = perm
-                            service.clearPermissionRequest()
                             permissionLauncher.launch(perm)
                         }
 

@@ -82,6 +82,8 @@ class TtsPlayer(
     private var androidTtsReady = false
     @Volatile
     private var activeAndroidDeferred: CompletableDeferred<Unit>? = null
+    @Volatile
+    private var activeAndroidUtteranceId: String? = null
 
     private val sentenceBuffer = StringBuilder()
     private val bufferLock = Any()
@@ -310,6 +312,7 @@ class TtsPlayer(
         runCatching { androidTts?.stop() }
         activeAndroidDeferred?.complete(Unit)
         activeAndroidDeferred = null
+        activeAndroidUtteranceId = null
         setSpeaking(false)
     }
 
@@ -421,12 +424,14 @@ class TtsPlayer(
         val tts = androidTts ?: return
         if (gen != generationId.get()) return
         val done = CompletableDeferred<Unit>()
-        activeAndroidDeferred = done
         val utteranceId = "utt_${gen}_${System.nanoTime()}"
+        activeAndroidDeferred = done
+        activeAndroidUtteranceId = utteranceId
         tts.speak(text, TextToSpeech.QUEUE_ADD, null, utteranceId)
         done.await()
         if (activeAndroidDeferred === done) {
             activeAndroidDeferred = null
+            activeAndroidUtteranceId = null
         }
     }
 
@@ -504,16 +509,28 @@ class TtsPlayer(
             }
 
             override fun onDone(utteranceId: String?) {
-                activeAndroidDeferred?.complete(Unit)
+                if (utteranceId == activeAndroidUtteranceId) {
+                    activeAndroidDeferred?.complete(Unit)
+                    activeAndroidDeferred = null
+                    activeAndroidUtteranceId = null
+                }
             }
 
             @Deprecated("Deprecated in API 21")
             override fun onError(utteranceId: String?) {
-                activeAndroidDeferred?.complete(Unit)
+                if (utteranceId == activeAndroidUtteranceId) {
+                    activeAndroidDeferred?.complete(Unit)
+                    activeAndroidDeferred = null
+                    activeAndroidUtteranceId = null
+                }
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
-                activeAndroidDeferred?.complete(Unit)
+                if (utteranceId == activeAndroidUtteranceId) {
+                    activeAndroidDeferred?.complete(Unit)
+                    activeAndroidDeferred = null
+                    activeAndroidUtteranceId = null
+                }
             }
         })
 
