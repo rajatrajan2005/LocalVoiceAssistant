@@ -379,6 +379,7 @@ class TtsPlayer(
         val track = ensureAudioTrack(rate)
         var framesWritten = 0L
         var startHeadCaptured = false
+        var trackStarted = false
 
         fun onSamples(samples: FloatArray): Int {
             if (gen != generationId.get()) return 0
@@ -393,9 +394,6 @@ class TtsPlayer(
                         onFirstFrame(track.playbackHeadPosition.toLong() and 0xFFFFFFFFL)
                         startHeadCaptured = true
                     }
-                    if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                        track.play()
-                    }
                 }
                 if (firstAudioEmitted.compareAndSet(false, true)) {
                     onFirstAudio()
@@ -404,6 +402,14 @@ class TtsPlayer(
                 val slice = minOf(2048, samples.size - offset)
                 val wrote = track.write(samples, offset, slice, AudioTrack.WRITE_BLOCKING)
                 if (wrote <= 0) break
+                if (!trackStarted) {
+                    synchronized(trackControlLock) {
+                        if (gen == generationId.get() && track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                            track.play()
+                        }
+                        trackStarted = true
+                    }
+                }
                 offset += wrote
                 framesWritten += wrote
                 onFramesWritten(framesWritten)
@@ -458,7 +464,7 @@ class TtsPlayer(
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_FLOAT,
         )
-        val bufferBytes = maxOf(minBytes, sampleRate * 4 / 5) // ~200 ms float buffer.
+        val bufferBytes = maxOf(minBytes, sampleRate * 4 * 3 / 2)
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -475,7 +481,6 @@ class TtsPlayer(
             )
             .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
-            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
         audioTrack = track
         trackSampleRate = sampleRate
