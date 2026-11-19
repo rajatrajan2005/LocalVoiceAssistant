@@ -575,7 +575,7 @@ class AssistantService : Service() {
             speechProgressGen = -1L
             lastSpeechSentence = -1
             lastSpeechWord = -1
-            ttsPlayer.beginStream(serviceScope)
+            ttsPlayer.stop()
 
             val result = llamaEngine.generate(
                 systemPrompt = ToolGrammar.SYSTEM_PROMPT,
@@ -587,7 +587,6 @@ class AssistantService : Service() {
                 if (delta.isNotEmpty()) {
                     streamedReply.append(delta)
                     _uiState.update { it.copy(assistantText = streamedReply.toString()) }
-                    ttsPlayer.appendText(delta)
                 }
             }
 
@@ -604,12 +603,8 @@ class AssistantService : Service() {
                     val usedFallback = parsed.text.isEmpty()
                     val replyText = if (usedFallback) "Okay." else parsed.text
                     _uiState.update { it.copy(assistantText = replyText) }
-                    if (usedFallback) {
-                        ttsPlayer.stop()
-                        ttsPlayer.speakImmediate(serviceScope, replyText)
-                    } else {
-                        ttsPlayer.finishStream()
-                    }
+                    ttsPlayer.stop()
+                    ttsPlayer.speakImmediate(serviceScope, replyText)
                 }
                 is ModelOutput.Call -> {
                     ttsPlayer.stop()
