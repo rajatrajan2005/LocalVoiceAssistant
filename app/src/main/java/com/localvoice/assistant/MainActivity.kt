@@ -41,7 +41,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.localvoice.assistant.service.AssistantService
@@ -49,6 +53,8 @@ import com.localvoice.assistant.service.AssistantUiState
 import com.localvoice.assistant.voice.ListeningState
 import java.util.Locale
 import kotlinx.coroutines.delay
+
+private val ANSWER_WORD_REGEX = Regex("\\S+")
 
 class MainActivity : ComponentActivity() {
     private var serviceState by mutableStateOf<AssistantService?>(null)
@@ -288,7 +294,36 @@ private fun AssistantScreen(
                     Text("You: ${state.lastUserText}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                 }
                 if (state.assistantText.isNotEmpty()) {
-                    Text("Assistant: ${state.assistantText}", style = MaterialTheme.typography.bodyLarge)
+                    val spokenIndex = state.spokenWordIndex
+                    val answer = remember(state.assistantText, spokenIndex) {
+                        buildAnnotatedString {
+                            append("Assistant: ")
+                            val matches = ANSWER_WORD_REGEX.findAll(state.assistantText).toList()
+                            var cursor = 0
+                            matches.forEachIndexed { index, match ->
+                                append(state.assistantText.substring(cursor, match.range.first))
+                                val style = when {
+                                    index == spokenIndex -> SpanStyle(
+                                        color = Color(0xFFFFFFFF),
+                                        background = Color(0x66FFC107),
+                                        fontWeight = FontWeight.Bold,
+                                    )
+
+                                    spokenIndex >= 0 && index < spokenIndex -> SpanStyle(
+                                        color = Color(0x99FFFFFF),
+                                    )
+
+                                    else -> SpanStyle(color = Color(0xDDFFFFFF))
+                                }
+                                withStyle(style) { append(match.value) }
+                                cursor = match.range.last + 1
+                            }
+                            if (cursor < state.assistantText.length) {
+                                append(state.assistantText.substring(cursor))
+                            }
+                        }
+                    }
+                    Text(answer, style = MaterialTheme.typography.bodyLarge)
                 }
 
                 val pending = state.pendingConfirmation
