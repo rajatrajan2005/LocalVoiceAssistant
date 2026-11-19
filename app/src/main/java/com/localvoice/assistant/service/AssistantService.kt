@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentCallbacks2
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
@@ -41,15 +42,23 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+data class LlmModelOption(
+    val name: String,
+    val path: String,
+)
+
 data class AssistantUiState(
     val llmLoaded: Boolean = false,
     val llmName: String = "None",
+    val availableModels: List<LlmModelOption> = emptyList(),
+    val selectedModelPath: String? = null,
     val speechReady: Boolean = false,
     val ttsBackend: TtsBackend = TtsBackend.UNAVAILABLE,
     val listeningState: ListeningState = ListeningState.IDLE,
@@ -74,6 +83,8 @@ class AssistantService : Service() {
     companion object {
         private const val CHANNEL_ID = "local_voice_assistant"
         private const val NOTIFICATION_ID = 101
+        private const val PREF_LLM_PATH = "llm_path"
+        const val ACTION_START_HANDS_FREE = "com.localvoice.assistant.START_HANDS_FREE"
     }
 
     inner class LocalBinder : Binder() {
@@ -100,6 +111,7 @@ class AssistantService : Service() {
     private lateinit var ttsPlayer: TtsPlayer
     private lateinit var audioPipeline: AudioPipeline
 
+    private lateinit var prefs: SharedPreferences
     private val _uiState = MutableStateFlow(AssistantUiState())
     val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
 
@@ -114,6 +126,8 @@ class AssistantService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        prefs = getSharedPreferences("localvoice", MODE_PRIVATE)
+        lastLlmPath = prefs.getString(PREF_LLM_PATH, null)
         createNotificationChannel()
         toolExecutor = ToolExecutor(this)
 
@@ -162,7 +176,13 @@ class AssistantService : Service() {
         reloadAllModels()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_START_HANDS_FREE) {
+            promoteToMicrophoneForeground()
+            startHandsFree()
+        }
+        return START_STICKY
+    }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -195,7 +215,27 @@ class AssistantService : Service() {
         ttsExecutor.shutdownNow()
     }
 
+    fun refreshModelList() {
+        val dir = File(resolveModelsRoot(), "llm")
+        val models = dir.listFiles { f -> f.isFile && f.name.endsWith(".gguf", ignoreCase = true) }
+            ?.sortedBy { it.name }
+            .orEmpty()
+            .map { LlmModelOption(it.name, it.absolutePath) }
+        val selected = lastLlmPath?.takeIf { path -> models.any { it.path == path } }
+            ?: findDefaultGguf(dir)?.absolutePath
+        _uiState.update { it.copy(availableModels = models, selectedModelPath = selected) }
+    }
+
+    fun selectModel(path: String) {
+        val name = File(path).name
+        prefs.edit().putString(PREF_LLM_PATH, path).apply()
+        lastLlmUri = null
+        _uiState.update { it.copy(selectedModelPath = path, statusMessage = "Switching to $name...") }
+        loadLlmFromPath(path, name)
+    }
+
     fun reloadAllModels() {
+        refreshModelList()
         val root = resolveModelsRoot()
         val vadPath = File(root, "vad/silero_vad.onnx").absolutePath
         val sttDir = File(root, "stt").absolutePath
@@ -278,9 +318,11 @@ class AssistantService : Service() {
     private fun loadLlmFromPath(path: String, label: String) {
         serviceScope.launch(llmDispatcher) {
             _uiState.update { it.copy(statusMessage = "Loading $label...") }
+            prefs.edit().putString(PREF_LLM_PATH, path).apply()
             lastLlmUri = null
             lastLlmPath = path
             lastLlmLabel = label
+            _uiState.update { it.copy(selectedModelPath = path) }
             val ok = llamaEngine.load(path, _uiState.value.threads)
             finishLlmLoad(ok, label)
         }
@@ -334,6 +376,17 @@ class AssistantService : Service() {
             if (enabled) {
                 startCaptureWithPermissionCheck(CaptureMode.HANDS_FREE)
             }
+        }
+    }
+
+    fun startHandsFree() {
+        serviceScope.launch {
+            var waitedMs = 0
+            while (!audioPipeline.modelsReady && waitedMs < 10_000) {
+                delay(100)
+                waitedMs += 100
+            }
+            setHandsFree(true)
         }
     }
 

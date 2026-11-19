@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,6 +24,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -34,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -108,6 +112,7 @@ class MainActivity : ComponentActivity() {
                         AssistantScreen(
                             state = state,
                             onPickModel = { safPicker.launch(arrayOf("*/*")) },
+                            onModelSelected = { service.selectModel(it) },
                             onReloadOrUnload = {
                                 if (state.llmLoaded) service.unloadLlm() else service.reloadAllModels()
                             },
@@ -144,6 +149,7 @@ class MainActivity : ComponentActivity() {
 private fun AssistantScreen(
     state: AssistantUiState,
     onPickModel: () -> Unit,
+    onModelSelected: (String) -> Unit,
     onReloadOrUnload: () -> Unit,
     onThreadsSelected: (Int) -> Unit,
     onHandsFreeChanged: (Boolean) -> Unit,
@@ -152,6 +158,10 @@ private fun AssistantScreen(
     onCancel: () -> Unit,
     onMicClick: () -> Unit,
 ) {
+    var modelExpanded by remember { mutableStateOf(false) }
+    val selectedModelName = state.availableModels.firstOrNull { it.path == state.selectedModelPath }?.name
+        ?: state.llmName
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -163,7 +173,36 @@ private fun AssistantScreen(
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("LLM: ${state.llmName}", style = MaterialTheme.typography.bodyMedium)
+                Box {
+                    OutlinedButton(
+                        onClick = { modelExpanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Model: $selectedModelName")
+                    }
+                    DropdownMenu(
+                        expanded = modelExpanded,
+                        onDismissRequest = { modelExpanded = false },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (state.availableModels.isEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("No local .gguf models") },
+                                onClick = { modelExpanded = false },
+                            )
+                        } else {
+                            state.availableModels.forEach { model ->
+                                DropdownMenuItem(
+                                    text = { Text(model.name) },
+                                    onClick = {
+                                        onModelSelected(model.path)
+                                        modelExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
                 Text(
                     "Speech: ${if (state.speechReady) "Ready" else "Missing"} | TTS: ${state.ttsBackend.name}",
                     style = MaterialTheme.typography.bodySmall,
