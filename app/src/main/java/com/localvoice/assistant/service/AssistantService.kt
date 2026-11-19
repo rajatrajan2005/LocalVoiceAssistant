@@ -601,9 +601,15 @@ class AssistantService : Service() {
 
             when (val parsed = ToolParser.parse(result.text, text)) {
                 is ModelOutput.Reply -> {
-                    val replyText = parsed.text.ifEmpty { "Okay." }
+                    val usedFallback = parsed.text.isEmpty()
+                    val replyText = if (usedFallback) "Okay." else parsed.text
                     _uiState.update { it.copy(assistantText = replyText) }
-                    ttsPlayer.finishStream()
+                    if (usedFallback) {
+                        ttsPlayer.stop()
+                        ttsPlayer.speakImmediate(serviceScope, replyText)
+                    } else {
+                        ttsPlayer.finishStream()
+                    }
                 }
                 is ModelOutput.Call -> {
                     ttsPlayer.stop()
@@ -661,7 +667,6 @@ class AssistantService : Service() {
             .setOngoing(true)
             .build()
 
-        ContextCompat.startForegroundService(this, Intent(this, AssistantService::class.java))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {

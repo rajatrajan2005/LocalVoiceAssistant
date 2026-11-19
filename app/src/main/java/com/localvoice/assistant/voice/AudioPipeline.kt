@@ -192,9 +192,12 @@ class AudioPipeline(
             return false
         }
 
-        if (AcousticEchoCanceler.isAvailable()) {
-            aec = AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
+        val echoCanceler = if (AcousticEchoCanceler.isAvailable()) {
+            AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
+        } else {
+            null
         }
+        aec = echoCanceler
         audioRecord = record
         manualFinishRequested.set(false)
 
@@ -204,7 +207,7 @@ class AudioPipeline(
             processAudioLoop(frameChannel, mode)
         }
         captureJob = scope.launch(captureDispatcher) {
-            readMicLoop(record, frameChannel)
+            readMicLoop(record, echoCanceler, frameChannel)
         }
         onStateChanged(if (mode == CaptureMode.MANUAL) ListeningState.SPEECH_ACTIVE else ListeningState.LISTENING)
         return true
@@ -227,7 +230,11 @@ class AudioPipeline(
         }
     }
 
-    private fun readMicLoop(record: AudioRecord, frameChannel: Channel<FloatArray>) {
+    private fun readMicLoop(
+        record: AudioRecord,
+        echoCanceler: AcousticEchoCanceler?,
+        frameChannel: Channel<FloatArray>,
+    ) {
         val pcm = ShortArray(FRAME_SAMPLES)
         try {
             record.startRecording()
@@ -240,7 +247,7 @@ class AudioPipeline(
             }
         } finally {
             runCatching { record.stop() }
-            releaseRecorder()
+            releaseRecorder(record, echoCanceler)
             frameChannel.close()
         }
     }
@@ -334,7 +341,6 @@ class AudioPipeline(
 
                         if (mode == CaptureMode.MANUAL) {
                             running.set(false)
-                            audioRecord?.let { runCatching { it.stop() } }
                             onStateChanged(ListeningState.IDLE)
                             break
                         }
@@ -344,7 +350,6 @@ class AudioPipeline(
                     drainVadSegments(localVad)
                     if (mode == CaptureMode.MANUAL && manualFinishRequested.getAndSet(false)) {
                         running.set(false)
-                        audioRecord?.let { runCatching { it.stop() } }
                         onStateChanged(ListeningState.IDLE)
                         break
                     }
@@ -417,10 +422,19 @@ class AudioPipeline(
 
     @Synchronized
     private fun releaseRecorder() {
-        aec?.release()
-        aec = null
-        audioRecord?.release()
-        audioRecord = null
+        releaseRecorder(audioRecord, aec)
+    }
+
+    @Synchronized
+    private fun releaseRecorder(record: AudioRecord?, echoCanceler: AcousticEchoCanceler?) {
+        echoCanceler?.release()
+        if (echoCanceler === aec) {
+            aec = null
+        }
+        record?.release()
+        if (record === audioRecord) {
+            audioRecord = null
+        }
     }
 
     private fun releaseModelsInternal() {
