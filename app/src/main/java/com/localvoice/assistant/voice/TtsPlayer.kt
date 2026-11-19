@@ -21,16 +21,40 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class TtsBackend { PIPER_OFFLINE, ANDROID_OFFLINE, UNAVAILABLE }
+
+data class SpeechProgress(
+    val generation: Long,
+    val sentenceIndex: Int,
+    val sentenceText: String,
+    val progress: Float,
+    val playedFrames: Long,
+    val totalFrames: Long,
+)
+
+private data class SentenceTimeline(
+    val index: Int,
+    val text: String,
+    val startFrame: Long,
+    val endFrame: Long,
+)
+
+private data class ProgressState(
+    val generation: Long,
+    val startHead: Long,
+    val sentences: List<SentenceTimeline>,
+)
 
 class TtsPlayer(
     private val context: Context,
     private val ttsDispatcher: CoroutineDispatcher,
     private val onSpeakingChanged: (Boolean) -> Unit,
     private val onFirstAudio: () -> Unit,
+    private val onSpeechProgress: (SpeechProgress) -> Unit,
 ) {
     private sealed interface QueueItem {
         val gen: Long
@@ -60,6 +84,8 @@ class TtsPlayer(
     private val speaking = AtomicBoolean(false)
     private val firstAudioEmitted = AtomicBoolean(false)
     private var activeGen = 0L
+    @Volatile
+    private var progressState: ProgressState? = null
 
     val backend: TtsBackend
         get() = when {
@@ -111,33 +137,79 @@ class TtsPlayer(
             var currentPlayGen = -1L
             var totalFramesWritten = 0L
             var utteranceStartHead = 0L
+            var sentenceIndex = 0
 
-            for (item in queue) {
-                if (item.gen != generationId.get()) continue
+            val progressTicker = launch {
+                while (isActive) {
+                    delay(25)
+                    val state = progressState ?: continue
+                    val track = audioTrack ?: continue
+                    if (state.generation != generationId.get()) continue
 
-                when (item) {
-                    is QueueItem.Speak -> {
-                        if (item.gen != currentPlayGen) {
-                            currentPlayGen = item.gen
-                            totalFramesWritten = 0L
-                            utteranceStartHead = audioTrack?.let {
-                                it.playbackHeadPosition.toLong() and 0xFFFFFFFFL
-                            } ?: 0L
-                            setSpeaking(true)
+                    val head = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                    val played = (head - state.startHead) and 0xFFFFFFFFL
+                    val total = state.sentences.lastOrNull()?.endFrame ?: 0L
+                    if (total <= 0L) continue
+
+                    val sentence = state.sentences.firstOrNull { played < it.endFrame }
+                        ?: state.sentences.last()
+                    val span = (sentence.endFrame - sentence.startFrame).coerceAtLeast(1L)
+                    val current = (played - sentence.startFrame).coerceIn(0L, span)
+                    onSpeechProgress(
+                        SpeechProgress(
+                            generation = state.generation,
+                            sentenceIndex = sentence.index,
+                            sentenceText = sentence.text,
+                            progress = current.toFloat() / span.toFloat(),
+                            playedFrames = played,
+                            totalFrames = total,
+                        )
+                    )
+                }
+            }
+
+            try {
+                for (item in queue) {
+                    if (item.gen != generationId.get()) continue
+
+                    when (item) {
+                        is QueueItem.Speak -> {
+                            if (item.gen != currentPlayGen) {
+                                currentPlayGen = item.gen
+                                totalFramesWritten = 0L
+                                sentenceIndex = 0
+                                utteranceStartHead = audioTrack?.let {
+                                    it.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                                } ?: 0L
+                                progressState = ProgressState(item.gen, utteranceStartHead, emptyList())
+                                setSpeaking(true)
+                            }
+                            val index = sentenceIndex++
+                            val startFrame = totalFramesWritten
+                            val written = synthesizeAndPlay(item.text, item.gen)
+                            totalFramesWritten += written
+                            val timelines = progressState?.sentences.orEmpty() + SentenceTimeline(
+                                index = index,
+                                text = item.text,
+                                startFrame = startFrame,
+                                endFrame = totalFramesWritten,
+                            )
+                            progressState = ProgressState(item.gen, utteranceStartHead, timelines)
                         }
-                        val written = synthesizeAndPlay(item.text, item.gen)
-                        totalFramesWritten += written
-                    }
 
-                    is QueueItem.EndUtterance -> {
-                        if (item.gen == currentPlayGen) {
-                            awaitAudioDrain(item.gen, utteranceStartHead, totalFramesWritten)
-                        }
-                        if (item.gen == generationId.get()) {
-                            setSpeaking(false)
+                        is QueueItem.EndUtterance -> {
+                            if (item.gen == currentPlayGen) {
+                                awaitAudioDrain(item.gen, utteranceStartHead, totalFramesWritten)
+                            }
+                            if (item.gen == generationId.get()) {
+                                setSpeaking(false)
+                            }
+                            progressState = null
                         }
                     }
                 }
+            } finally {
+                progressTicker.cancel()
             }
         }
     }
@@ -188,6 +260,7 @@ class TtsPlayer(
 
     fun stop() {
         generationId.incrementAndGet()
+        progressState = null
         synchronized(bufferLock) {
             sentenceBuffer.setLength(0)
         }

@@ -40,6 +40,7 @@ import com.localvoice.assistant.tools.ToolParser
 import com.localvoice.assistant.voice.AudioPipeline
 import com.localvoice.assistant.voice.CaptureMode
 import com.localvoice.assistant.voice.ListeningState
+import com.localvoice.assistant.voice.SpeechProgress
 import com.localvoice.assistant.voice.TtsBackend
 import com.localvoice.assistant.voice.TtsPlayer
 import java.io.File
@@ -77,6 +78,7 @@ data class AssistantUiState(
     val partialTranscript: String = "",
     val lastUserText: String = "",
     val assistantText: String = "",
+    val spokenWordIndex: Int = -1,
     val statusMessage: String = "Initializing...",
     val pendingConfirmation: PendingConfirmation? = null,
     val permissionRequest: String? = null,
@@ -92,6 +94,7 @@ class AssistantService : Service() {
         private const val NOTIFICATION_ID = 101
         private const val PREF_LLM_PATH = "llm_path"
         const val ACTION_START_HANDS_FREE = "com.localvoice.assistant.START_HANDS_FREE"
+        private val ANSWER_WORD_REGEX = Regex("\\S+")
     }
 
     inner class LocalBinder : Binder() {
@@ -132,6 +135,8 @@ class AssistantService : Service() {
     private var lastLlmPath: String? = null
     private var lastLlmUri: Uri? = null
     private var lastLlmLabel: String = "None"
+    private var activeSpeechGen = -1L
+    private val spokenSentenceWordCounts = mutableMapOf<Int, Int>()
     @Volatile
     private var turnStartMs = 0L
 
@@ -173,7 +178,16 @@ class AssistantService : Service() {
             ttsDispatcher = ttsDispatcher,
             onSpeakingChanged = { speaking ->
                 audioPipeline.setTtsPlaying(speaking)
-                _uiState.update { it.copy(isSpeaking = speaking) }
+                if (!speaking) {
+                    activeSpeechGen = -1L
+                    spokenSentenceWordCounts.clear()
+                }
+                _uiState.update {
+                    it.copy(
+                        isSpeaking = speaking,
+                        spokenWordIndex = if (speaking) it.spokenWordIndex else -1,
+                    )
+                }
             },
             onFirstAudio = {
                 val started = turnStartMs
@@ -182,6 +196,7 @@ class AssistantService : Service() {
                     _uiState.update { it.copy(ttfaMs = ttfa) }
                 }
             },
+            onSpeechProgress = ::onSpeechProgress,
         )
 
         audioPipeline = AudioPipeline(
@@ -414,6 +429,26 @@ class AssistantService : Service() {
         _uiState.update { it.copy(bargeInEnabled = enabled) }
     }
 
+    private fun onSpeechProgress(progress: SpeechProgress) {
+        if (progress.generation != activeSpeechGen) {
+            activeSpeechGen = progress.generation
+            spokenSentenceWordCounts.clear()
+        }
+
+        val words = ANSWER_WORD_REGEX.findAll(progress.sentenceText).toList()
+        if (words.isEmpty()) return
+        spokenSentenceWordCounts[progress.sentenceIndex] = words.size
+
+        val offset = (0 until progress.sentenceIndex).sumOf { spokenSentenceWordCounts[it] ?: 0 }
+        val localIndex = (progress.progress * words.size).toInt().coerceIn(0, words.lastIndex)
+        val spokenIndex = offset + localIndex
+        val visibleWordCount = ANSWER_WORD_REGEX.findAll(_uiState.value.assistantText).count()
+        val safeIndex = spokenIndex.coerceAtMost(maxOf(0, visibleWordCount - 1))
+        _uiState.update { state ->
+            if (state.spokenWordIndex == safeIndex) state else state.copy(spokenWordIndex = safeIndex)
+        }
+    }
+
     fun setHandsFree(enabled: Boolean) {
         _uiState.update { it.copy(handsFree = enabled) }
         serviceScope.launch {
@@ -573,9 +608,11 @@ class AssistantService : Service() {
 
         activeLlmJob?.cancel()
         activeLlmJob = serviceScope.launch(llmDispatcher) {
-            _uiState.update { it.copy(isGenerating = true, assistantText = "") }
+            _uiState.update { it.copy(isGenerating = true, assistantText = "", spokenWordIndex = -1) }
             val streamer = JsonReplyStreamer()
             val streamedReply = StringBuilder()
+            activeSpeechGen = -1L
+            spokenSentenceWordCounts.clear()
             ttsPlayer.beginStream(serviceScope)
 
             val result = llamaEngine.generate(
