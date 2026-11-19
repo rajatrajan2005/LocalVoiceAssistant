@@ -72,7 +72,7 @@ data class AssistantUiState(
     val listeningState: ListeningState = ListeningState.IDLE,
     val handsFree: Boolean = false,
     val bargeInEnabled: Boolean = true,
-    val threads: Int = LlamaEngine.MAX_THREADS,
+    val threads: Int = LlamaEngine.DEFAULT_THREADS,
     val isGenerating: Boolean = false,
     val isSpeaking: Boolean = false,
     val partialTranscript: String = "",

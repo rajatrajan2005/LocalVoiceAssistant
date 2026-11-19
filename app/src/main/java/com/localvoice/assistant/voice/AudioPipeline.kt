@@ -109,7 +109,7 @@ class AudioPipeline(
                         sileroVadModelConfig = SileroVadModelConfig(
                             model = vadFile.absolutePath,
                             threshold = 0.4f,
-                            minSilenceDuration = 0.45f,
+                            minSilenceDuration = 0.32f,
                             minSpeechDuration = 0.12f,
                             windowSize = FRAME_SAMPLES,
                             maxSpeechDuration = 15.0f,
@@ -132,7 +132,7 @@ class AudioPipeline(
                                 uncachedDecoder = uncachedDecoder.absolutePath,
                             ),
                             tokens = tokens.absolutePath,
-                            numThreads = 4,
+                            numThreads = 2,
                             debug = false,
                             provider = "cpu",
                             modelType = "",
