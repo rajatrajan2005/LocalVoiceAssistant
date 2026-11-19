@@ -135,8 +135,12 @@ class AssistantService : Service() {
     private var lastLlmPath: String? = null
     private var lastLlmUri: Uri? = null
     private var lastLlmLabel: String = "None"
-    private var activeSpeechGen = -1L
-    private val spokenSentenceWordCounts = mutableMapOf<Int, Int>()
+    @Volatile
+    private var speechProgressGen = -1L
+    @Volatile
+    private var lastSpeechSentence = -1
+    @Volatile
+    private var lastSpeechWord = -1
     @Volatile
     private var turnStartMs = 0L
 
@@ -179,8 +183,9 @@ class AssistantService : Service() {
             onSpeakingChanged = { speaking ->
                 audioPipeline.setTtsPlaying(speaking)
                 if (!speaking) {
-                    activeSpeechGen = -1L
-                    spokenSentenceWordCounts.clear()
+                    speechProgressGen = -1L
+                    lastSpeechSentence = -1
+                    lastSpeechWord = -1
                 }
                 _uiState.update {
                     it.copy(
@@ -430,20 +435,27 @@ class AssistantService : Service() {
     }
 
     private fun onSpeechProgress(progress: SpeechProgress) {
-        if (progress.generation != activeSpeechGen) {
-            activeSpeechGen = progress.generation
-            spokenSentenceWordCounts.clear()
+        if (progress.generation != speechProgressGen) {
+            speechProgressGen = progress.generation
+            lastSpeechSentence = -1
+            lastSpeechWord = -1
+            _uiState.update { it.copy(spokenWordIndex = -1) }
         }
+        if (progress.sentenceIndex < lastSpeechSentence) return
 
         val words = ANSWER_WORD_REGEX.findAll(progress.sentenceText).toList()
         if (words.isEmpty()) return
-        spokenSentenceWordCounts[progress.sentenceIndex] = words.size
-
-        val offset = (0 until progress.sentenceIndex).sumOf { spokenSentenceWordCounts[it] ?: 0 }
         val localIndex = (progress.progress * words.size).toInt().coerceIn(0, words.lastIndex)
-        val spokenIndex = offset + localIndex
+        val candidate = progress.wordsBefore + localIndex
+        val monotonic = if (progress.sentenceIndex == lastSpeechSentence) {
+            maxOf(candidate, lastSpeechWord)
+        } else {
+            candidate
+        }
         val visibleWordCount = ANSWER_WORD_REGEX.findAll(_uiState.value.assistantText).count()
-        val safeIndex = spokenIndex.coerceAtMost(maxOf(0, visibleWordCount - 1))
+        val safeIndex = monotonic.coerceAtMost(maxOf(0, visibleWordCount - 1))
+        lastSpeechSentence = progress.sentenceIndex
+        lastSpeechWord = safeIndex
         _uiState.update { state ->
             if (state.spokenWordIndex == safeIndex) state else state.copy(spokenWordIndex = safeIndex)
         }
@@ -611,8 +623,9 @@ class AssistantService : Service() {
             _uiState.update { it.copy(isGenerating = true, assistantText = "", spokenWordIndex = -1) }
             val streamer = JsonReplyStreamer()
             val streamedReply = StringBuilder()
-            activeSpeechGen = -1L
-            spokenSentenceWordCounts.clear()
+            speechProgressGen = -1L
+            lastSpeechSentence = -1
+            lastSpeechWord = -1
             ttsPlayer.beginStream(serviceScope)
 
             val result = llamaEngine.generate(

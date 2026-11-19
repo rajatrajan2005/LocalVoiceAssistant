@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
@@ -27,10 +28,15 @@ import kotlinx.coroutines.withContext
 
 enum class TtsBackend { PIPER_OFFLINE, ANDROID_OFFLINE, UNAVAILABLE }
 
+private val SPEECH_WORD_REGEX = Regex("\\S+")
+
+private fun String.wordCount(): Int = SPEECH_WORD_REGEX.findAll(this).count()
+
 data class SpeechProgress(
     val generation: Long,
     val sentenceIndex: Int,
     val sentenceText: String,
+    val wordsBefore: Int,
     val progress: Float,
     val playedFrames: Long,
     val totalFrames: Long,
@@ -39,6 +45,7 @@ data class SpeechProgress(
 private data class SentenceTimeline(
     val index: Int,
     val text: String,
+    val wordsBefore: Int,
     val startFrame: Long,
     val endFrame: Long,
 )
@@ -137,9 +144,10 @@ class TtsPlayer(
             var currentPlayGen = -1L
             var totalFramesWritten = 0L
             var utteranceStartHead = 0L
+            var utteranceHeadCaptured = false
             var sentenceIndex = 0
 
-            val progressTicker = launch {
+            val progressTicker = launch(Dispatchers.Default) {
                 while (isActive) {
                     delay(25)
                     val state = progressState ?: continue
@@ -160,6 +168,7 @@ class TtsPlayer(
                             generation = state.generation,
                             sentenceIndex = sentence.index,
                             sentenceText = sentence.text,
+                            wordsBefore = sentence.wordsBefore,
                             progress = current.toFloat() / span.toFloat(),
                             playedFrames = played,
                             totalFrames = total,
@@ -178,23 +187,51 @@ class TtsPlayer(
                                 currentPlayGen = item.gen
                                 totalFramesWritten = 0L
                                 sentenceIndex = 0
-                                utteranceStartHead = audioTrack?.let {
-                                    it.playbackHeadPosition.toLong() and 0xFFFFFFFFL
-                                } ?: 0L
+                                utteranceStartHead = 0L
+                                utteranceHeadCaptured = false
                                 progressState = ProgressState(item.gen, utteranceStartHead, emptyList())
                                 setSpeaking(true)
                             }
                             val index = sentenceIndex++
                             val startFrame = totalFramesWritten
-                            val written = synthesizeAndPlay(item.text, item.gen)
-                            totalFramesWritten += written
-                            val timelines = progressState?.sentences.orEmpty() + SentenceTimeline(
-                                index = index,
-                                text = item.text,
-                                startFrame = startFrame,
-                                endFrame = totalFramesWritten,
+                            val timelines = progressState?.sentences.orEmpty()
+                            val wordsBefore = timelines.sumOf { it.text.wordCount() }
+                            progressState = ProgressState(
+                                item.gen,
+                                utteranceStartHead,
+                                timelines + SentenceTimeline(
+                                    index = index,
+                                    text = item.text,
+                                    wordsBefore = wordsBefore,
+                                    startFrame = startFrame,
+                                    endFrame = startFrame + 1L,
+                                ),
                             )
-                            progressState = ProgressState(item.gen, utteranceStartHead, timelines)
+                            val written = synthesizeAndPlay(
+                                text = item.text,
+                                gen = item.gen,
+                                onFirstFrame = { head ->
+                                    if (!utteranceHeadCaptured) {
+                                        utteranceHeadCaptured = true
+                                        utteranceStartHead = head
+                                        progressState = progressState?.copy(startHead = head)
+                                    }
+                                },
+                                onFramesWritten = { sentenceFrames ->
+                                    progressState = progressState?.let { state ->
+                                        state.copy(
+                                            sentences = state.sentences.mapIndexed { i, timeline ->
+                                                if (i == index) {
+                                                    timeline.copy(endFrame = startFrame + maxOf(1L, sentenceFrames))
+                                                } else {
+                                                    timeline
+                                                }
+                                            },
+                                        )
+                                    }
+                                },
+                            )
+                            totalFramesWritten += written
                         }
 
                         is QueueItem.EndUtterance -> {
@@ -312,10 +349,15 @@ class TtsPlayer(
         return -1
     }
 
-    private suspend fun synthesizeAndPlay(text: String, gen: Long): Long {
+    private suspend fun synthesizeAndPlay(
+        text: String,
+        gen: Long,
+        onFirstFrame: (Long) -> Unit,
+        onFramesWritten: (Long) -> Unit,
+    ): Long {
         val piper = offlineTts
         if (piper != null) {
-            return playWithPiper(piper, text, gen)
+            return playWithPiper(piper, text, gen, onFirstFrame, onFramesWritten)
         }
         if (androidTtsReady) {
             playWithAndroidTts(text, gen)
@@ -323,10 +365,17 @@ class TtsPlayer(
         return 0L
     }
 
-    private fun playWithPiper(piper: OfflineTts, text: String, gen: Long): Long {
+    private fun playWithPiper(
+        piper: OfflineTts,
+        text: String,
+        gen: Long,
+        onFirstFrame: (Long) -> Unit,
+        onFramesWritten: (Long) -> Unit,
+    ): Long {
         val rate = piper.sampleRate()
         val track = ensureAudioTrack(rate)
         var framesWritten = 0L
+        var startHeadCaptured = false
 
         fun onSamples(samples: FloatArray): Int {
             if (gen != generationId.get()) return 0
@@ -337,6 +386,10 @@ class TtsPlayer(
                 if (gen != generationId.get()) return 0
                 synchronized(trackControlLock) {
                     if (gen != generationId.get()) return 0
+                    if (!startHeadCaptured) {
+                        onFirstFrame(track.playbackHeadPosition.toLong() and 0xFFFFFFFFL)
+                        startHeadCaptured = true
+                    }
                     if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
                         track.play()
                     }
@@ -350,6 +403,7 @@ class TtsPlayer(
                 if (wrote <= 0) break
                 offset += wrote
                 framesWritten += wrote
+                onFramesWritten(framesWritten)
             }
             return if (gen == generationId.get()) 1 else 0
         }
