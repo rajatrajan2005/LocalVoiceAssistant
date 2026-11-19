@@ -18,6 +18,7 @@ data class GenerateResult(
 class LlamaEngine {
     companion object {
         const val DEFAULT_CONTEXT_LENGTH = 1024
+        const val DEFAULT_THREADS = 4
         const val MAX_THREADS = 8
 
         init {
@@ -39,7 +40,7 @@ class LlamaEngine {
     val isLoaded: Boolean
         get() = handle != 0L
 
-    fun load(modelPath: String, threads: Int = MAX_THREADS): Boolean = synchronized(opLock) {
+    fun load(modelPath: String, threads: Int = DEFAULT_THREADS): Boolean = synchronized(opLock) {
         unloadInternal()
         val clamped = threads.coerceIn(1, MAX_THREADS)
         val ptr = nativeLoad(modelPath, DEFAULT_CONTEXT_LENGTH, clamped)
