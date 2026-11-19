@@ -7,10 +7,16 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentCallbacks2
+import android.content.ComponentName
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Binder
 import android.os.Build
@@ -19,6 +25,7 @@ import android.os.IBinder
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.core.content.ContextCompat
+import com.localvoice.assistant.HeadsetButtonReceiver
 import com.localvoice.assistant.MainActivity
 import com.localvoice.assistant.llm.LlamaEngine
 import com.localvoice.assistant.tools.ConfirmationDecision
@@ -112,6 +119,10 @@ class AssistantService : Service() {
     private lateinit var audioPipeline: AudioPipeline
 
     private lateinit var prefs: SharedPreferences
+    private lateinit var audioManager: AudioManager
+    private lateinit var mediaSession: MediaSession
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var lastHeadsetTriggerMs = 0L
     private val _uiState = MutableStateFlow(AssistantUiState())
     val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
 
@@ -128,7 +139,33 @@ class AssistantService : Service() {
         super.onCreate()
         prefs = getSharedPreferences("localvoice", MODE_PRIVATE)
         lastLlmPath = prefs.getString(PREF_LLM_PATH, null)
+        audioManager = getSystemService(AudioManager::class.java)
+        @Suppress("DEPRECATION")
+        audioManager.registerMediaButtonEventReceiver(HeadsetButtonReceiver.componentName(this))
+
+        mediaSession = MediaSession(this, "LocalVoiceHeadset")
+        mediaSession.setFlags(
+            MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+        )
+        val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON)
+            .setComponent(HeadsetButtonReceiver.componentName(this))
+        val mediaButtonPendingIntent = PendingIntent.getBroadcast(
+            this,
+            1,
+            mediaButtonIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        mediaSession.setMediaButtonReceiver(mediaButtonPendingIntent)
+        mediaSession.setCallback(object : MediaSession.Callback() {
+            override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                return HeadsetButtonReceiver.handleMediaButton(this@AssistantService, mediaButtonIntent)
+            }
+        })
+        mediaSession.isActive = true
+        takeMediaButtonPriority()
+
         createNotificationChannel()
+        promoteToMicrophoneForeground()
         toolExecutor = ToolExecutor(this)
 
         ttsPlayer = TtsPlayer(
@@ -177,6 +214,7 @@ class AssistantService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        takeMediaButtonPriority()
         if (intent?.action == ACTION_START_HANDS_FREE) {
             promoteToMicrophoneForeground()
             startHandsFree()
@@ -203,6 +241,13 @@ class AssistantService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        @Suppress("DEPRECATION")
+        audioManager.unregisterMediaButtonEventReceiver(HeadsetButtonReceiver.componentName(this))
+        mediaSession.isActive = false
+        mediaSession.release()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        }
         serviceScope.cancel()
         llamaEngine.unload()
         kotlinx.coroutines.runBlocking {
@@ -380,6 +425,12 @@ class AssistantService : Service() {
     }
 
     fun startHandsFree() {
+        val now = SystemClock.elapsedRealtime()
+        val state = _uiState.value
+        if (now - lastHeadsetTriggerMs < 1_000) return
+        if (state.handsFree && state.listeningState != ListeningState.IDLE) return
+        lastHeadsetTriggerMs = now
+
         serviceScope.launch {
             var waitedMs = 0
             while (!audioPipeline.modelsReady && waitedMs < 10_000) {
@@ -596,6 +647,27 @@ class AssistantService : Service() {
         }
     }
 
+    private fun takeMediaButtonPriority() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                .setAudioAttributes(attributes)
+                .setOnAudioFocusChangeListener { }
+                .build()
+            audioFocusRequest = request
+            audioManager.requestAudioFocus(request)
+        }
+        mediaSession.isActive = true
+        mediaSession.setPlaybackState(
+            PlaybackState.Builder()
+                .setState(PlaybackState.STATE_PLAYING, 0, 1f, SystemClock.elapsedRealtime())
+                .build()
+        )
+    }
+
     private fun promoteToMicrophoneForeground() {
         val openAppIntent = PendingIntent.getActivity(
             this,
@@ -611,7 +683,6 @@ class AssistantService : Service() {
             .setOngoing(true)
             .build()
 
-        ContextCompat.startForegroundService(this, Intent(this, AssistantService::class.java))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
@@ -630,11 +701,18 @@ class AssistantService : Service() {
     }
 
     private fun resolveModelsRoot(): File {
-        val ext = getExternalFilesDir(null)?.let { File(it, "models") }
-        if (ext != null && ext.exists()) return ext
+        val own = getExternalFilesDir(null)?.let { File(it, "models") }
+        if (own != null && own.exists() && own.listFiles()?.isNotEmpty() == true) return own
+
+        val androidData = own?.parentFile?.parentFile?.parentFile
+        if (androidData != null) {
+            val original = File(androidData, "com.localvoice.assistant/files/models")
+            if (original.exists() && original.listFiles()?.isNotEmpty() == true) return original
+        }
+
         val internal = File(filesDir, "models")
-        if (internal.exists()) return internal
-        return (ext ?: internal).apply { mkdirs() }
+        if (internal.exists() && internal.listFiles()?.isNotEmpty() == true) return internal
+        return (own ?: internal).apply { mkdirs() }
     }
 
     private fun findDefaultGguf(dir: File): File? {

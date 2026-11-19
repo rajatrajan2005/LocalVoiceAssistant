@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -127,6 +128,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (event?.action == KeyEvent.ACTION_DOWN && HeadsetButtonReceiver.isTriggerKey(keyCode)) {
+            HeadsetButtonReceiver.startHandsFree(this)
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     override fun onStart() {

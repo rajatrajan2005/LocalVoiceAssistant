@@ -7,6 +7,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- Auto-granted normal permission required for set_alarm and set_timer intents. -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- Auto-granted normal permission required to observe Bluetooth headset connections. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <!-- Required to keep the headset-button listener alive after reboot. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Requested lazily only when call_contact or send_sms needs to look up a contact name. -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
 
@@ -60,6 +64,31 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".HeadsetButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".HeadsetWakeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.HEADSET_PLUG" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Owns LLM/STT/TTS lifecycle and mic capture while active. -->
         <service

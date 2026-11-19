@@ -11,11 +11,11 @@ android {
     compileSdk = 35 // Required by AndroidX 1.15/Compose tooling; runtime behavior stays pinned to targetSdk 30.
 
     defaultConfig {
-        applicationId = "com.localvoice.assistant"
+        applicationId = "com.localvoice.assistant.headset"
         minSdk = 28
         targetSdk = 30
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0-headset"
 
         ndk {
             // Galaxy A50 (Exynos 9610) is arm64-v8a only; also strips x86/armeabi-v7a from sherpa-onnx AAR.
