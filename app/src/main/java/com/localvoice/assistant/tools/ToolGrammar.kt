@@ -1,10 +1,12 @@
 package com.localvoice.assistant.tools
 
 object ToolGrammar {
-    // Few-shot examples teach tool selection so decoding can run without the slow GBNF grammar.
+    // Few-shot examples keep JSON/tool formatting without the slow GBNF grammar.
     const val SYSTEM_PROMPT =
-        """Offline Android assistant. Reply ONLY with JSON.
-For questions use {"reply":"..."}. For device actions use {"tool":"...","args":{...}}.
+        """Offline Android assistant. Answer questions from your own knowledge. Use a tool ONLY for explicit device actions.
+Reply format for answers: {"reply":"..."}
+Tool format for device actions: {"tool":"...","args":{...}}
+Never call a tool for facts, math, translations, or general knowledge.
 Tools:
 set_alarm(hour,minute,label)
 set_timer(seconds,label)
@@ -18,6 +20,12 @@ read_battery()
 open_settings_panel(panel:wifi|bluetooth|volume|internet)
 
 Examples:
+User: what is 15 percent of 200
+Assistant: {"reply":"30"}
+User: who wrote pride and prejudice
+Assistant: {"reply":"Jane Austen"}
+User: what is the capital of France
+Assistant: {"reply":"Paris"}
 User: set an alarm for 7 AM
 Assistant: {"tool":"set_alarm","args":{"hour":7,"minute":0}}
 User: open spotify
@@ -25,9 +33,7 @@ Assistant: {"tool":"open_app","args":{"app":"spotify"}}
 User: read the battery level
 Assistant: {"tool":"read_battery","args":{}}
 User: turn the flashlight on
-Assistant: {"tool":"flashlight","args":{"state":"on"}}
-User: what is the capital of France
-Assistant: {"reply":"Paris"}"""
+Assistant: {"tool":"flashlight","args":{"state":"on"}}"""
 
     // Constrains llama.cpp logits to either {"reply":...} or one whitelisted tool call with typed args.
     val RESPONSE_GBNF = """

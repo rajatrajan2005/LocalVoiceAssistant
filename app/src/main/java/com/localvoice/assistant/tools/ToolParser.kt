@@ -22,15 +22,18 @@ sealed interface ModelOutput {
 }
 
 object ToolParser {
-    fun parse(text: String): ModelOutput {
+    private val COMMAND_HINT = Regex(
+        """(?i)(^(please\s+)?(set|open|launch|call|dial|text|send|turn|switch|play|pause|skip|next|previous|mute|unmute)\b|\b(set an? alarm|set a timer|read (the )?battery|battery level|flashlight|torch|volume up|volume down|wifi|bluetooth|settings panel)\b)"""
+    )
+    private val EMBEDDED_REPLY = Regex(""""reply"\s*:\s*"((?:\\.|[^"\\])*)"""")
+
+    fun parse(text: String, userPrompt: String = ""): ModelOutput {
         val trimmed = stripFences(text)
         if (trimmed.isEmpty()) return ModelOutput.Invalid("Empty response.")
 
-        val obj = runCatching { JSONObject(trimmed) }.getOrElse {
-            return ModelOutput.Invalid("I didn't understand that response.")
-        }
+        val obj = runCatching { JSONObject(trimmed) }.getOrNull()
 
-        if (obj.has("tool")) {
+        if (obj != null && obj.has("tool") && COMMAND_HINT.containsMatchIn(userPrompt)) {
             val name = obj.optString("tool", "")
             val args = obj.optJSONObject("args") ?: JSONObject()
             val action = toAction(name, args)
@@ -38,12 +41,24 @@ object ToolParser {
             return ModelOutput.Call(action)
         }
 
-        if (obj.has("reply")) {
+        if (obj != null && obj.has("reply")) {
             return ModelOutput.Reply(obj.optString("reply", ""))
         }
 
+        val embedded = EMBEDDED_REPLY.find(trimmed)?.groupValues?.getOrNull(1)
+        if (!embedded.isNullOrEmpty()) return ModelOutput.Reply(unescapeJson(embedded))
+
+        if (obj == null && !trimmed.startsWith("{")) return ModelOutput.Reply(trimmed)
+
         return ModelOutput.Invalid("I didn't understand that response.")
     }
+
+    private fun unescapeJson(value: String): String = value
+        .replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace("\\\"", "\"")
+        .replace("\\\\", "\\")
 
     private fun stripFences(text: String): String {
         var s = text.trim()
@@ -95,10 +110,23 @@ class JsonReplyStreamer {
     private val raw = StringBuilder()
     private var emittedChars = 0
     private var isToolCall = false
+    private var mode = 0 // 0 undecided, 1 JSON, 2 plain text
 
     fun feed(token: String): String {
         if (token.isEmpty()) return ""
         raw.append(token)
+
+        if (mode == 0) {
+            val first = raw.toString().trimStart().firstOrNull() ?: return ""
+            mode = if (first == '{' || first == '`') 1 else 2
+        }
+
+        if (mode == 2) {
+            val delta = raw.substring(emittedChars)
+            emittedChars = raw.length
+            return delta
+        }
+
         if (!isToolCall) {
             val replyKey = raw.indexOf("\"reply\"")
             val toolKey = raw.indexOf("\"tool\"")

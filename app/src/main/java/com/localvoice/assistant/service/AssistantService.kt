@@ -496,7 +496,7 @@ class AssistantService : Service() {
                 return@launch
             }
 
-            when (val parsed = ToolParser.parse(result.text)) {
+            when (val parsed = ToolParser.parse(result.text, text)) {
                 is ModelOutput.Reply -> {
                     val replyText = parsed.text.ifEmpty { "Okay." }
                     _uiState.update { it.copy(assistantText = replyText) }
@@ -509,6 +509,7 @@ class AssistantService : Service() {
                 is ModelOutput.Invalid -> {
                     ttsPlayer.stop()
                     _uiState.update { it.copy(assistantText = parsed.reason) }
+                    ttsPlayer.speakImmediate(serviceScope, parsed.reason)
                 }
             }
         }
