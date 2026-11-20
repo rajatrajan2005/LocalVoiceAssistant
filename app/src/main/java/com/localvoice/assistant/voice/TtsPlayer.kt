@@ -93,6 +93,7 @@ class TtsPlayer(
     private val speaking = AtomicBoolean(false)
     private val firstAudioEmitted = AtomicBoolean(false)
     private var activeGen = 0L
+    private var hasEmittedClauseForCurrentUtterance = false
     @Volatile
     private var progressState: ProgressState? = null
 
@@ -259,6 +260,7 @@ class TtsPlayer(
         synchronized(bufferLock) {
             activeGen = gen
             sentenceBuffer.setLength(0)
+            hasEmittedClauseForCurrentUtterance = false
         }
         firstAudioEmitted.set(false)
     }
@@ -328,17 +330,19 @@ class TtsPlayer(
 
     private fun extractReadySentences(out: MutableList<String>) {
         while (true) {
-            val splitAt = findSentenceBoundary(sentenceBuffer)
+            val allowClause = !hasEmittedClauseForCurrentUtterance && sentenceBuffer.length >= 24
+            val splitAt = findSentenceBoundary(sentenceBuffer, allowClause)
             if (splitAt < 0) break
             val sentence = sentenceBuffer.substring(0, splitAt + 1).trim()
             sentenceBuffer.delete(0, splitAt + 1)
             if (sentence.isNotEmpty()) {
                 out.add(sentence)
+                hasEmittedClauseForCurrentUtterance = true
             }
         }
     }
 
-    private fun findSentenceBoundary(sb: CharSequence): Int {
+    private fun findSentenceBoundary(sb: CharSequence, allowClause: Boolean): Int {
         val len = sb.length
         for (i in 0 until len) {
             val c = sb[i]
@@ -347,6 +351,9 @@ class TtsPlayer(
                 val followedBySpace = i + 1 < len && sb[i + 1].isWhitespace()
                 val isAbbrev = c == '.' && i >= 2 && sb[i - 2] == '.'
                 if (followedBySpace && !isAbbrev) return i
+            }
+            if (allowClause && (c == ',' || c == ';' || c == ':') && i + 1 < len && sb[i + 1].isWhitespace()) {
+                return i
             }
         }
         return -1
@@ -398,8 +405,8 @@ class TtsPlayer(
                 if (firstAudioEmitted.compareAndSet(false, true)) {
                     onFirstAudio()
                 }
-                // Write in ~90 ms slices so stop() unblocks AudioTrack nearly immediately on barge-in.
-                val slice = minOf(2048, samples.size - offset)
+                // Write in ~64 ms slices so stop() unblocks AudioTrack nearly immediately on barge-in.
+                val slice = minOf(1024, samples.size - offset)
                 val wrote = track.write(samples, offset, slice, AudioTrack.WRITE_BLOCKING)
                 if (wrote <= 0) break
                 if (!trackStarted) {

@@ -2,15 +2,19 @@
 #include <android/log.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "llama.h"
+#include "ggml-cpu.h"
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "LlamaJNI", __VA_ARGS__)
 
@@ -21,6 +25,7 @@ constexpr int32_t kMaxThreads = 4; // Cap to Galaxy A50's 4 big Cortex-A73 cores
 struct LlamaHandle {
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
+    ggml_threadpool * threadpool = nullptr;
     const llama_vocab * vocab = nullptr;
     std::atomic<bool> cancel_requested{false};
     std::atomic<int32_t> pending_threads{kMaxThreads};
@@ -43,6 +48,49 @@ bool abort_callback(void * data) {
 
 int32_t clamp_threads(int32_t threads) {
     return std::max(1, std::min(threads, kMaxThreads));
+}
+
+std::array<int32_t, kMaxThreads> select_big_cores(int32_t threads) {
+    std::array<int32_t, kMaxThreads> cores{};
+    cores.fill(-1);
+
+    std::vector<std::pair<long long, int32_t>> freqs;
+    for (int32_t cpu = 0; cpu < 8; ++cpu) {
+        char path[128];
+        std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+        FILE * file = std::fopen(path, "r");
+        if (!file) continue;
+        long long freq = 0;
+        if (std::fscanf(file, "%lld", &freq) == 1 && freq > 0) {
+            freqs.emplace_back(freq, cpu);
+        }
+        std::fclose(file);
+    }
+
+    std::sort(freqs.begin(), freqs.end(), [](const auto & a, const auto & b) {
+        return a.first > b.first;
+    });
+
+    const size_t count = static_cast<size_t>(threads);
+    if (freqs.size() >= count) {
+        for (size_t i = 0; i < count; ++i) cores[i] = freqs[i].second;
+    } else {
+        for (int32_t i = 0; i < threads; ++i) cores[i] = 4 + i;
+    }
+    return cores;
+}
+
+ggml_threadpool * create_big_core_threadpool(int32_t threads) {
+    ggml_threadpool_params params = ggml_threadpool_params_default(threads);
+    const auto cores = select_big_cores(threads);
+    for (int32_t i = 0; i < threads; ++i) {
+        const int32_t cpu = cores[i];
+        if (cpu >= 0 && cpu < GGML_MAX_N_THREADS) {
+            params.cpumask[cpu] = true;
+        }
+    }
+    params.strict_cpu = true;
+    return ggml_threadpool_new(&params);
 }
 
 std::string jstring_to_std(JNIEnv * env, jstring s) {
@@ -213,21 +261,43 @@ Java_com_localvoice_assistant_llm_LlamaEngine_nativeLoad(
 
     const int32_t threads = clamp_threads(n_threads);
     llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = static_cast<uint32_t>(std::max(256, n_ctx));
-    cparams.n_batch = 256;
+    cparams.n_ctx = 1024;
+    cparams.n_batch = 512;
+    cparams.n_ubatch = 512;
     cparams.n_threads = threads;
     cparams.n_threads_batch = threads;
+    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    cparams.type_k = GGML_TYPE_Q8_0;
+    cparams.type_v = GGML_TYPE_Q8_0;
 
     llama_context * ctx = llama_init_from_model(model, cparams);
+    if (!ctx) {
+        cparams = llama_context_default_params();
+        cparams.n_ctx = 1024;
+        cparams.n_batch = 512;
+        cparams.n_ubatch = 512;
+        cparams.n_threads = threads;
+        cparams.n_threads_batch = threads;
+        cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+        cparams.type_k = GGML_TYPE_F16;
+        cparams.type_v = GGML_TYPE_F16;
+        ctx = llama_init_from_model(model, cparams);
+    }
     if (!ctx) {
         LOGE("Failed to create llama_context");
         llama_model_free(model);
         return 0;
     }
 
+    ggml_threadpool * threadpool = create_big_core_threadpool(threads);
+    if (threadpool) {
+        llama_attach_threadpool(ctx, threadpool, nullptr);
+    }
+
     auto * h = new LlamaHandle();
     h->model = model;
     h->ctx = ctx;
+    h->threadpool = threadpool;
     h->vocab = llama_model_get_vocab(model);
     h->pending_threads.store(threads, std::memory_order_relaxed);
     llama_set_abort_callback(ctx, abort_callback, h);
@@ -246,7 +316,12 @@ Java_com_localvoice_assistant_llm_LlamaEngine_nativeUnload(
     h->cancel_requested.store(true, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(h->op_mutex);
+        if (h->ctx && h->threadpool) llama_detach_threadpool(h->ctx);
         if (h->ctx) llama_free(h->ctx);
+        if (h->threadpool) {
+            ggml_threadpool_free(h->threadpool);
+            h->threadpool = nullptr;
+        }
         if (h->model) llama_model_free(h->model);
     }
     delete h;
@@ -261,7 +336,23 @@ Java_com_localvoice_assistant_llm_LlamaEngine_nativeSetThreads(
 ) {
     auto * h = reinterpret_cast<LlamaHandle *>(handle_ptr);
     if (!h) return;
-    h->pending_threads.store(clamp_threads(n_threads), std::memory_order_relaxed);
+    const int32_t threads = clamp_threads(n_threads);
+    if (threads == h->pending_threads.load(std::memory_order_relaxed)) return;
+
+    std::lock_guard<std::mutex> lock(h->op_mutex);
+    if (h->ctx) {
+        llama_set_n_threads(h->ctx, threads, threads);
+        if (h->threadpool) {
+            llama_detach_threadpool(h->ctx);
+            ggml_threadpool_free(h->threadpool);
+            h->threadpool = nullptr;
+        }
+        h->threadpool = create_big_core_threadpool(threads);
+        if (h->threadpool) {
+            llama_attach_threadpool(h->ctx, h->threadpool, nullptr);
+        }
+    }
+    h->pending_threads.store(threads, std::memory_order_relaxed);
 }
 
 JNIEXPORT void JNICALL
@@ -368,13 +459,9 @@ Java_com_localvoice_assistant_llm_LlamaEngine_nativeGenerate(
             llama_sampler_free(smpl);
             return make_result(env, 0, prefill_ms, 0, false);
         }
-        // Apply grammar before top-k/top-p so invalid syntax tokens are masked out first.
         llama_sampler_chain_add(smpl, g);
     }
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.9f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.2f));
-    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+    llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
 
     jclass receiver_cls = env->GetObjectClass(receiver);
     jmethodID on_token_mid = receiver_cls
