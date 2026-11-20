@@ -14,6 +14,7 @@ set(GGML_CPU ON CACHE BOOL "" FORCE)
 # Exynos 9610 (Cortex-A73/A53) supports baseline ARMv8.0-A NEON only; dotprod/i8mm cause SIGILL.
 set(GGML_CPU_ARM_ARCH "armv8-a" CACHE STRING "" FORCE)
 set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "" FORCE)
+set(GGML_CPU_REPACK ON CACHE BOOL "" FORCE)
 set(GGML_CPU_KLEIDIAI OFF CACHE BOOL "" FORCE)
 # Pthreads avoid bundling NDK libomp.so.
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
@@ -40,8 +41,19 @@ add_library(llama_jni SHARED llama_jni.cpp)
 target_compile_options(llama_jni PRIVATE
     -march=armv8-a
     -O3
+    -mtune=cortex-a73
     -fvisibility=hidden
 )
+
+foreach(GGML_CPU_TARGET ggml-cpu ggml-cpu-armv8-a)
+    if(TARGET ${GGML_CPU_TARGET})
+        target_compile_options(${GGML_CPU_TARGET} PRIVATE
+            -march=armv8-a
+            -O3
+            -mtune=cortex-a73
+        )
+    endif()
+endforeach()
 
 target_include_directories(llama_jni PRIVATE
     "${LLAMA_DIR}/include"

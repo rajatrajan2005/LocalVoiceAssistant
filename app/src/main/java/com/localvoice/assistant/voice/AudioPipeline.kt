@@ -16,7 +16,13 @@ import com.k2fsa.sherpa.onnx.OfflineMoonshineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineStream
+import com.k2fsa.sherpa.onnx.OnlineModelConfig
+import com.k2fsa.sherpa.onnx.OnlineRecognizer
+import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OnlineStream
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
+import com.k2fsa.sherpa.onnx.TenVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
 import java.io.File
@@ -54,7 +60,8 @@ class AudioPipeline(
 ) {
     companion object {
         const val SAMPLE_RATE = 16_000
-        private const val FRAME_SAMPLES = 512 // Matches Silero VAD's 32 ms window at 16 kHz.
+        private const val SILERO_FRAME_SAMPLES = 512
+        private const val TEN_VAD_FRAME_SAMPLES = 256
         private const val PRE_ROLL_FRAMES = 12 // ~384 ms ring buffer preserves word onset before VAD triggers.
         private const val BARGE_IN_FRAMES = 6 // ~192 ms sustained speech guards against TTS speaker echo bursts.
         private const val BARGE_IN_MIN_RMS = 0.015f
@@ -62,11 +69,14 @@ class AudioPipeline(
         private const val MIN_HANDS_FREE_UTTERANCE_MS = 600L
         private const val FRAME_CHANNEL_CAPACITY = 128
         private const val POST_TTS_ECHO_COOLDOWN_MS = 140L
-        private const val TAIL_SILENCE_SAMPLES = 5120
+        private const val TAIL_SILENCE_SAMPLES = 2560
     }
 
     private var vad: Vad? = null
     private var recognizer: OfflineRecognizer? = null
+    private var onlineRecognizer: OnlineRecognizer? = null
+    private var onlineStream: OnlineStream? = null
+    private var vadFrameSamples = SILERO_FRAME_SAMPLES
 
     private var captureJob: Job? = null
     private var sttJob: Job? = null
@@ -80,7 +90,7 @@ class AudioPipeline(
     private val muteCooldownUntilMs = AtomicLong(0L)
 
     val modelsReady: Boolean
-        get() = vad != null && recognizer != null
+        get() = vad != null && (recognizer != null || onlineRecognizer != null)
 
     suspend fun loadModels(vadModelPath: String, sttDirPath: String): SpeechLoadResult =
         withContext(sttDispatcher) {
@@ -88,64 +98,114 @@ class AudioPipeline(
 
             val vadFile = File(vadModelPath)
             if (!vadFile.isFile) {
-                return@withContext SpeechLoadResult(false, "Missing Silero VAD: $vadModelPath")
+                return@withContext SpeechLoadResult(false, "Missing VAD: $vadModelPath")
             }
+            val tenVadFile = vadFile.parentFile?.listFiles { f ->
+                f.isFile &&
+                    f.name.startsWith("ten-vad", ignoreCase = true) &&
+                    f.name.endsWith(".onnx", ignoreCase = true)
+            }?.firstOrNull()
 
             val sttDir = File(sttDirPath)
-            val preprocess = findModel(sttDir, "preprocess")
-                ?: return@withContext SpeechLoadResult(false, "Missing preprocess*.onnx in $sttDirPath")
-            val encoder = findModel(sttDir, "encode.")
-                ?: return@withContext SpeechLoadResult(false, "Missing encode*.onnx in $sttDirPath")
-            val cachedDecoder = findModel(sttDir, "cached_decode")
-                ?: return@withContext SpeechLoadResult(false, "Missing cached_decode*.onnx in $sttDirPath")
-            val uncachedDecoder = findModel(sttDir, "uncached_decode")
-                ?: return@withContext SpeechLoadResult(false, "Missing uncached_decode*.onnx in $sttDirPath")
             val tokens = File(sttDir, "tokens.txt").takeIf { it.isFile }
                 ?: return@withContext SpeechLoadResult(false, "Missing tokens.txt in $sttDirPath")
+            val moonshinePreprocess = findModel(sttDir, "preprocess")
+            val moonshineEncoder = moonshinePreprocess?.let { findModel(sttDir, "encode") }
+            val moonshineCachedDecoder = moonshinePreprocess?.let { findModel(sttDir, "cached_decode") }
+            val moonshineUncachedDecoder = moonshinePreprocess?.let { findModel(sttDir, "uncached_decode") }
+            val useMoonshine = moonshinePreprocess != null && moonshineEncoder != null &&
+                moonshineCachedDecoder != null && moonshineUncachedDecoder != null
+            val zipEncoder = if (useMoonshine) null else findModel(sttDir, "encoder")
+            val zipDecoder = if (useMoonshine) null else findModel(sttDir, "decoder")
+            val zipJoiner = if (useMoonshine) null else findModel(sttDir, "joiner")
+            if (!useMoonshine && (zipEncoder == null || zipDecoder == null || zipJoiner == null)) {
+                return@withContext SpeechLoadResult(false, "No Moonshine or Zipformer STT model in $sttDirPath")
+            }
 
             runCatching {
+                val sileroConfig = SileroVadModelConfig(
+                    model = vadFile.absolutePath,
+                    threshold = 0.35f,
+                    minSilenceDuration = 0.30f,
+                    minSpeechDuration = 0.12f,
+                    windowSize = SILERO_FRAME_SAMPLES,
+                    maxSpeechDuration = 15.0f,
+                )
+                val tenConfig = if (tenVadFile != null) {
+                    TenVadModelConfig(
+                        model = tenVadFile.absolutePath,
+                        threshold = 0.45f,
+                        minSilenceDuration = 0.28f,
+                        minSpeechDuration = 0.10f,
+                        windowSize = TEN_VAD_FRAME_SAMPLES,
+                        maxSpeechDuration = 15.0f,
+                    )
+                } else {
+                    TenVadModelConfig()
+                }
                 vad = Vad(
                     config = VadModelConfig(
-                        sileroVadModelConfig = SileroVadModelConfig(
-                            model = vadFile.absolutePath,
-                            threshold = 0.4f,
-                            minSilenceDuration = 0.32f,
-                            minSpeechDuration = 0.12f,
-                            windowSize = FRAME_SAMPLES,
-                            maxSpeechDuration = 15.0f,
-                        ),
+                        sileroVadModelConfig = sileroConfig,
+                        tenVadModelConfig = tenConfig,
                         sampleRate = SAMPLE_RATE,
                         numThreads = 1,
                         provider = "cpu",
                         debug = false,
                     )
                 )
+                vadFrameSamples = if (tenVadFile != null) TEN_VAD_FRAME_SAMPLES else SILERO_FRAME_SAMPLES
 
-                recognizer = OfflineRecognizer(
-                    config = OfflineRecognizerConfig(
-                        featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
-                        modelConfig = OfflineModelConfig(
-                            moonshine = OfflineMoonshineModelConfig(
-                                preprocessor = preprocess.absolutePath,
-                                encoder = encoder.absolutePath,
-                                cachedDecoder = cachedDecoder.absolutePath,
-                                uncachedDecoder = uncachedDecoder.absolutePath,
+                if (moonshinePreprocess != null && moonshineEncoder != null &&
+                    moonshineCachedDecoder != null && moonshineUncachedDecoder != null
+                ) {
+                    recognizer = OfflineRecognizer(
+                        config = OfflineRecognizerConfig(
+                            featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
+                            modelConfig = OfflineModelConfig(
+                                moonshine = OfflineMoonshineModelConfig(
+                                    preprocessor = moonshinePreprocess.absolutePath,
+                                    encoder = moonshineEncoder.absolutePath,
+                                    cachedDecoder = moonshineCachedDecoder.absolutePath,
+                                    uncachedDecoder = moonshineUncachedDecoder.absolutePath,
+                                ),
+                                tokens = tokens.absolutePath,
+                                numThreads = 2,
+                                debug = false,
+                                provider = "cpu",
+                                modelType = "",
                             ),
-                            tokens = tokens.absolutePath,
-                            numThreads = 2,
-                            debug = false,
-                            provider = "cpu",
-                            modelType = "",
-                        ),
-                        decodingMethod = "greedy_search",
+                            decodingMethod = "greedy_search",
+                        )
                     )
-                )
+                } else {
+                    onlineRecognizer = OnlineRecognizer(
+                        config = OnlineRecognizerConfig(
+                            featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
+                            modelConfig = OnlineModelConfig(
+                                transducer = OnlineTransducerModelConfig(
+                                    encoder = zipEncoder!!.absolutePath,
+                                    decoder = zipDecoder!!.absolutePath,
+                                    joiner = zipJoiner!!.absolutePath,
+                                ),
+                                tokens = tokens.absolutePath,
+                                numThreads = 2,
+                                debug = false,
+                                provider = "cpu",
+                                modelType = "",
+                            ),
+                            enableEndpoint = false,
+                            decodingMethod = "greedy_search",
+                        )
+                    )
+                }
             }.onFailure { err ->
                 releaseModelsInternal()
                 return@withContext SpeechLoadResult(false, "Speech model load failed: ${err.message}")
             }
 
-            SpeechLoadResult(true, "Silero VAD + Moonshine loaded")
+            val vadLabel = if (tenVadFile != null) "TEN-VAD" else "Silero VAD"
+            val sttLabel = if (useMoonshine) "Moonshine" else "Zipformer"
+            return@withContext SpeechLoadResult(true, "$vadLabel + $sttLabel loaded")
         }
 
     fun setTtsPlaying(playing: Boolean) {
@@ -178,9 +238,9 @@ class AudioPipeline(
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
-        val bufferBytes = maxOf(minBuf * 2, FRAME_SAMPLES * 2 * 16)
+        val bufferBytes = maxOf(minBuf * 2, SILERO_FRAME_SAMPLES * 2 * 16)
         val record = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.MIC,
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -235,11 +295,11 @@ class AudioPipeline(
         echoCanceler: AcousticEchoCanceler?,
         frameChannel: Channel<FloatArray>,
     ) {
-        val pcm = ShortArray(FRAME_SAMPLES)
+        val pcm = ShortArray(vadFrameSamples)
         try {
             record.startRecording()
             while (running.get()) {
-                val read = record.read(pcm, 0, FRAME_SAMPLES)
+                val read = record.read(pcm, 0, vadFrameSamples)
                 if (read > 0) {
                     val floats = FloatArray(read) { pcm[it] / 32768.0f }
                     frameChannel.trySend(floats)
@@ -254,29 +314,42 @@ class AudioPipeline(
 
     private suspend fun processAudioLoop(frameChannel: Channel<FloatArray>, mode: CaptureMode) {
         val localVad = vad ?: return
-        val localStt = recognizer ?: return
+        val localStt = recognizer
+        val localOnline = onlineRecognizer
+        if (localStt == null && localOnline == null) return
         localVad.reset()
+        onlineStream?.release()
+        onlineStream = localOnline?.createStream("")
 
         val preRoll = ArrayDeque<FloatArray>(PRE_ROLL_FRAMES + 1)
         val utterance = ArrayList<FloatArray>(MAX_UTTERANCE_MS.toInt() / 32)
         var capturingSpeech = (mode == CaptureMode.MANUAL)
         var speechStartedMs = if (capturingSpeech) SystemClock.elapsedRealtime() else 0L
+        var lastSpeechDetectedMs = speechStartedMs
         var bargeInStreak = 0
         var wasMuted = false
+
+        fun resetOnlineStream() {
+            onlineStream?.release()
+            onlineStream = localOnline?.createStream("")
+        }
 
         try {
             for (frame in frameChannel) {
                 if (!running.get() || !currentCoroutineIsActive()) break
 
+                val now = SystemClock.elapsedRealtime()
                 val muted = ttsPlaying.get() && !bargeInEnabled.get()
-                val inCooldown = SystemClock.elapsedRealtime() < muteCooldownUntilMs.get()
+                val inCooldown = now < muteCooldownUntilMs.get()
                 if (muted || inCooldown) {
                     if (!wasMuted) {
                         wasMuted = true
                         preRoll.clear()
                         utterance.clear()
                         localVad.reset()
+                        resetOnlineStream()
                         bargeInStreak = 0
+                        lastSpeechDetectedMs = SystemClock.elapsedRealtime()
                     }
                     continue
                 }
@@ -285,10 +358,17 @@ class AudioPipeline(
                 }
 
                 pushPreRoll(preRoll, frame)
+                if (localOnline != null && onlineStream != null) {
+                    onlineStream!!.acceptWaveform(frame, SAMPLE_RATE)
+                    localOnline.decode(onlineStream!!)
+                }
                 localVad.acceptWaveform(frame)
 
+                val speechNow = localVad.isSpeechDetected()
+                if (speechNow) lastSpeechDetectedMs = SystemClock.elapsedRealtime()
+
                 if (ttsPlaying.get()) {
-                    if (localVad.isSpeechDetected() && frameRms(frame) >= BARGE_IN_MIN_RMS) {
+                    if (speechNow && frameRms(frame) >= BARGE_IN_MIN_RMS) {
                         bargeInStreak++
                     } else {
                         bargeInStreak = 0
@@ -298,19 +378,22 @@ class AudioPipeline(
                         ttsPlaying.set(false)
                         onBargeIn()
                         drainVadSegments(localVad)
+                        resetOnlineStream()
                         utterance.clear()
                         utterance.addAll(preRoll)
                         preRoll.clear()
                         capturingSpeech = true
                         speechStartedMs = SystemClock.elapsedRealtime()
+                        lastSpeechDetectedMs = speechStartedMs
                         onStateChanged(ListeningState.SPEECH_ACTIVE)
                     }
                     continue
                 }
 
-                if (!capturingSpeech && localVad.isSpeechDetected()) {
+                if (!capturingSpeech && speechNow) {
                     capturingSpeech = true
                     speechStartedMs = SystemClock.elapsedRealtime()
+                    lastSpeechDetectedMs = speechStartedMs
                     utterance.clear()
                     utterance.addAll(preRoll)
                     preRoll.clear()
@@ -324,16 +407,24 @@ class AudioPipeline(
                     val timedOut = speechMs >= MAX_UTTERANCE_MS
                     val vadEndpoint = mode == CaptureMode.HANDS_FREE && !localVad.empty() &&
                         speechMs >= MIN_HANDS_FREE_UTTERANCE_MS
+                    val stuckEndpoint = localVad.empty() && !speechNow &&
+                        SystemClock.elapsedRealtime() - lastSpeechDetectedMs > 650L
                     val manualDone = mode == CaptureMode.MANUAL && manualFinishRequested.getAndSet(false)
 
-                    if (vadEndpoint || manualDone || timedOut) {
+                    if (vadEndpoint || manualDone || timedOut || stuckEndpoint) {
                         val tEndpoint = SystemClock.elapsedRealtime()
                         drainVadSegments(localVad)
-                        val finalText = recognizeUtterance(localStt, utterance)
+                        val finalText = if (localStt != null) {
+                            recognizeUtterance(localStt, utterance)
+                        } else {
+                            recognizeStreamingUtterance(localOnline!!, onlineStream!!)
+                        }
                         val sttLatencyMs = SystemClock.elapsedRealtime() - tEndpoint
 
                         utterance.clear()
                         capturingSpeech = false
+                        resetOnlineStream()
+                        lastSpeechDetectedMs = SystemClock.elapsedRealtime()
 
                         if (finalText.isNotEmpty()) {
                             onFinalTranscript(finalText, sttLatencyMs)
@@ -357,7 +448,18 @@ class AudioPipeline(
             }
         } finally {
             utterance.clear()
+            onlineStream?.release()
+            onlineStream = null
         }
+    }
+
+    private fun recognizeStreamingUtterance(rec: OnlineRecognizer, stream: OnlineStream): String {
+        stream.inputFinished()
+        var guard = 0
+        while (rec.isReady(stream) && guard++ < 100) {
+            rec.decode(stream)
+        }
+        return rec.getResult(stream).text.trim()
     }
 
     private fun recognizeUtterance(rec: OfflineRecognizer, frames: List<FloatArray>): String {
@@ -438,9 +540,13 @@ class AudioPipeline(
     }
 
     private fun releaseModelsInternal() {
+        onlineStream?.release()
+        onlineStream = null
         vad?.release()
         vad = null
         recognizer?.release()
         recognizer = null
+        onlineRecognizer?.release()
+        onlineRecognizer = null
     }
 }

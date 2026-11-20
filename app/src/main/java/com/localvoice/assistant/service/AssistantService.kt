@@ -581,7 +581,7 @@ class AssistantService : Service() {
                 systemPrompt = ToolGrammar.SYSTEM_PROMPT,
                 userPrompt = text,
                 grammar = null,
-                maxTokens = 160,
+                maxTokens = 96,
             ) { token ->
                 val delta = streamer.feed(token)
                 if (delta.isNotEmpty()) {
