@@ -14,8 +14,8 @@ android {
         applicationId = "com.localvoice.assistant"
         minSdk = 28
         targetSdk = 30
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
 
         ndk {
             // Galaxy A50 (Exynos 9610) is arm64-v8a only; also strips x86/armeabi-v7a from sherpa-onnx AAR.
