@@ -86,6 +86,7 @@ class AssistantService : Service() {
         private const val CHANNEL_ID = "local_voice_assistant"
         private const val NOTIFICATION_ID = 101
         private const val PREF_LLM_PATH = "llm_path"
+        private const val PREF_LLM_URI = "llm_uri"
         const val ACTION_START_HANDS_FREE = "com.localvoice.assistant.START_HANDS_FREE"
         private val ANSWER_WORD_REGEX = Regex("\\S+")
     }
@@ -137,6 +138,9 @@ class AssistantService : Service() {
         super.onCreate()
         prefs = getSharedPreferences("localvoice", MODE_PRIVATE)
         lastLlmPath = prefs.getString(PREF_LLM_PATH, null)
+        lastLlmUri = prefs.getString(PREF_LLM_URI, null)?.let { value ->
+            runCatching { Uri.parse(value) }.getOrNull()
+        }
         createNotificationChannel()
         toolExecutor = ToolExecutor(this)
 
@@ -224,7 +228,9 @@ class AssistantService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        llamaEngine.unload()
+        kotlinx.coroutines.runBlocking(llmDispatcher) {
+            llamaEngine.unload()
+        }
         kotlinx.coroutines.runBlocking {
             audioPipeline.release()
             ttsPlayer.release()
@@ -248,7 +254,7 @@ class AssistantService : Service() {
 
     fun selectModel(path: String) {
         val name = File(path).name
-        prefs.edit().putString(PREF_LLM_PATH, path).apply()
+        prefs.edit().putString(PREF_LLM_PATH, path).remove(PREF_LLM_URI).apply()
         lastLlmUri = null
         _uiState.update { it.copy(selectedModelPath = path, statusMessage = "Switching to $name...") }
         loadLlmFromPath(path, name)
@@ -307,6 +313,7 @@ class AssistantService : Service() {
             }.getOrDefault(false)
 
             if (loadedDirect) {
+                prefs.edit().putString(PREF_LLM_URI, uri.toString()).remove(PREF_LLM_PATH).apply()
                 lastLlmUri = uri
                 lastLlmPath = null
                 lastLlmLabel = name
@@ -327,6 +334,7 @@ class AssistantService : Service() {
                 return@launch
             }
 
+            prefs.edit().putString(PREF_LLM_PATH, dest.absolutePath).remove(PREF_LLM_URI).apply()
             lastLlmUri = null
             lastLlmPath = dest.absolutePath
             lastLlmLabel = name
@@ -338,7 +346,7 @@ class AssistantService : Service() {
     private fun loadLlmFromPath(path: String, label: String) {
         serviceScope.launch(llmDispatcher) {
             _uiState.update { it.copy(statusMessage = "Loading $label...") }
-            prefs.edit().putString(PREF_LLM_PATH, path).apply()
+            prefs.edit().putString(PREF_LLM_PATH, path).remove(PREF_LLM_URI).apply()
             lastLlmUri = null
             lastLlmPath = path
             lastLlmLabel = label
@@ -696,13 +704,13 @@ class AssistantService : Service() {
     }
 
     private fun queryDisplayName(uri: Uri): String {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+        val raw = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
             val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0 && c.moveToFirst()) {
-                return c.getString(idx) ?: "model.gguf"
-            }
-        }
-        return "model.gguf"
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+        } ?: "model.gguf"
+        val base = raw.substringAfterLast('/').substringAfterLast('\\')
+        val safe = base.replace(Regex("[^A-Za-z0-9._-]"), "_").trim('.')
+        return safe.takeIf { it.isNotBlank() } ?: "model.gguf"
     }
 
     fun refreshRamMetric() {

@@ -93,6 +93,7 @@ class LlamaEngine {
             }
         }
 
+        nativeClearCancel(ptr)
         val stats = nativeGenerate(ptr, systemPrompt, userPrompt, grammar, maxTokens, receiver)
         val tail = utf8.flush()
         if (tail.isNotEmpty()) {
@@ -173,6 +174,7 @@ class LlamaEngine {
     private external fun nativeUnload(handle: Long)
     private external fun nativeSetThreads(handle: Long, nThreads: Int)
     private external fun nativeCancel(handle: Long)
+    private external fun nativeClearCancel(handle: Long)
     private external fun nativeWarmPrefix(handle: Long, systemPrompt: String): Boolean
     private external fun nativeGenerate(
         handle: Long,

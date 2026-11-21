@@ -89,7 +89,15 @@ class MainActivity : ComponentActivity() {
                         val safPicker = rememberLauncherForActivityResult(
                             ActivityResultContracts.OpenDocument()
                         ) { uri ->
-                            if (uri != null) service.loadLlmFromUri(uri)
+                            if (uri != null) {
+                                runCatching {
+                                    contentResolver.takePersistableUriPermission(
+                                        uri,
+                                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                    )
+                                }
+                                service.loadLlmFromUri(uri)
+                            }
                         }
 
                         var launchedPermissionName by remember { mutableStateOf<String?>(null) }

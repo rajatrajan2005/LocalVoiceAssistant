@@ -74,6 +74,7 @@ class TtsPlayer(
     private var workerJob: Job? = null
 
     private var offlineTts: OfflineTts? = null
+    @Volatile
     private var audioTrack: AudioTrack? = null
     private var trackSampleRate = 0
 
@@ -107,7 +108,8 @@ class TtsPlayer(
     suspend fun loadModel(ttsDirPath: String): TtsBackend = withContext(ttsDispatcher) {
         releaseInternal()
         val dir = File(ttsDirPath)
-        val modelFile = dir.listFiles { f -> f.isFile && f.name.endsWith(".onnx") }?.firstOrNull()
+        val modelFile = dir.listFiles { f -> f.isFile && f.name.endsWith(".onnx") }
+            ?.sortedBy { it.name }?.firstOrNull()
         val tokensFile = File(dir, "tokens.txt").takeIf { it.isFile }
         val espeakDir = File(dir, "espeak-ng-data").takeIf { it.isDirectory }
         val lexiconFile = File(dir, "lexicon.txt").takeIf { it.isFile }

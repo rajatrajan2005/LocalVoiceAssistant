@@ -366,6 +366,17 @@ Java_com_localvoice_assistant_llm_LlamaEngine_nativeCancel(
     h->cancel_requested.store(true, std::memory_order_relaxed);
 }
 
+JNIEXPORT void JNICALL
+Java_com_localvoice_assistant_llm_LlamaEngine_nativeClearCancel(
+    JNIEnv * /* env */,
+    jobject /* thiz */,
+    jlong handle_ptr
+) {
+    auto * h = reinterpret_cast<LlamaHandle *>(handle_ptr);
+    if (!h) return;
+    h->cancel_requested.store(false, std::memory_order_relaxed);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_localvoice_assistant_llm_LlamaEngine_nativeWarmPrefix(
     JNIEnv * env,
@@ -377,7 +388,6 @@ Java_com_localvoice_assistant_llm_LlamaEngine_nativeWarmPrefix(
     if (!h) return JNI_FALSE;
 
     std::lock_guard<std::mutex> lock(h->op_mutex);
-    h->cancel_requested.store(false, std::memory_order_relaxed);
     std::string system_prompt = jstring_to_std(env, jsystem);
     return ensure_prefix_locked(h, system_prompt) ? JNI_TRUE : JNI_FALSE;
 }
@@ -397,7 +407,6 @@ Java_com_localvoice_assistant_llm_LlamaEngine_nativeGenerate(
     if (!h || !receiver) return make_result(env, 0, 0, 0, true);
 
     std::lock_guard<std::mutex> lock(h->op_mutex);
-    h->cancel_requested.store(false, std::memory_order_relaxed);
 
     const int32_t threads = h->pending_threads.load(std::memory_order_relaxed);
     llama_set_n_threads(h->ctx, threads, threads);
