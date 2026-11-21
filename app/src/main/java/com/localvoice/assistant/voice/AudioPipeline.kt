@@ -104,7 +104,7 @@ class AudioPipeline(
                 f.isFile &&
                     f.name.startsWith("ten-vad", ignoreCase = true) &&
                     f.name.endsWith(".onnx", ignoreCase = true)
-            }?.firstOrNull()
+            }?.sortedBy { it.name }?.firstOrNull()
 
             val sttDir = File(sttDirPath)
             val tokens = File(sttDir, "tokens.txt").takeIf { it.isFile }
@@ -518,7 +518,7 @@ class AudioPipeline(
         if (!dir.isDirectory) return null
         val files = dir.listFiles { f ->
             f.isFile && f.name.startsWith(prefix) && f.name.endsWith(".onnx")
-        }.orEmpty().toList()
+        }.orEmpty().toList().sortedBy { it.name }
         return files.firstOrNull { it.name.contains("int8") } ?: files.firstOrNull()
     }
 

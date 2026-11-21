@@ -14,8 +14,8 @@ android {
         applicationId = "com.localvoice.assistant.headset"
         minSdk = 28
         targetSdk = 30
-        versionCode = 1
-        versionName = "1.0-headset"
+        versionCode = 2
+        versionName = "1.1-headset"
 
         ndk {
             // Galaxy A50 (Exynos 9610) is arm64-v8a only; also strips x86/armeabi-v7a from sherpa-onnx AAR.
