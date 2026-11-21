@@ -75,6 +75,7 @@ data class AssistantUiState(
     val statusMessage: String = "Initializing...",
     val pendingConfirmation: PendingConfirmation? = null,
     val permissionRequest: String? = null,
+    val waveform: List<Float> = emptyList(),
     val tokensPerSec: Double = 0.0,
     val sttLatencyMs: Long = 0L,
     val ttfaMs: Long = 0L,
@@ -87,6 +88,7 @@ class AssistantService : Service() {
         private const val NOTIFICATION_ID = 101
         private const val PREF_LLM_PATH = "llm_path"
         private const val PREF_LLM_URI = "llm_uri"
+        private const val WAVEFORM_BARS = 48
         const val ACTION_START_HANDS_FREE = "com.localvoice.assistant.START_HANDS_FREE"
         private val ANSWER_WORD_REGEX = Regex("\\S+")
     }
@@ -118,6 +120,9 @@ class AssistantService : Service() {
     private lateinit var prefs: SharedPreferences
     private val _uiState = MutableStateFlow(AssistantUiState())
     val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
+
+    private val waveformLevels = FloatArray(WAVEFORM_BARS)
+    private var waveformCursor = 0
 
     private var activeLlmJob: Job? = null
     private var pendingPermissionAction: ToolAction? = null
@@ -177,10 +182,17 @@ class AssistantService : Service() {
             sttDispatcher = sttDispatcher,
             onStateChanged = { state ->
                 _uiState.update {
-                    it.copy(
-                        listeningState = state,
-                        partialTranscript = if (state == ListeningState.IDLE) "" else it.partialTranscript,
-                    )
+                    if (state == ListeningState.IDLE) {
+                        waveformLevels.fill(0f)
+                        waveformCursor = 0
+                        it.copy(
+                            listeningState = state,
+                            partialTranscript = "",
+                            waveform = waveformLevels.toList(),
+                        )
+                    } else {
+                        it.copy(listeningState = state)
+                    }
                 }
                 if (state == ListeningState.IDLE && !_uiState.value.handsFree) {
                     serviceScope.launch { audioPipeline.stop() }
@@ -194,6 +206,14 @@ class AssistantService : Service() {
             },
             onBargeIn = {
                 handleBargeIn()
+            },
+            onAudioLevel = { rms ->
+                val level = (rms * 8f).coerceIn(0f, 1f)
+                waveformLevels[waveformCursor] = level
+                waveformCursor = (waveformCursor + 1) % WAVEFORM_BARS
+                val ordered = waveformLevels.copyOfRange(waveformCursor, WAVEFORM_BARS) +
+                    waveformLevels.copyOfRange(0, waveformCursor)
+                _uiState.update { it.copy(waveform = ordered.toList()) }
             },
         )
 
