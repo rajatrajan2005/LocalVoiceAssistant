@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Auto-granted normal permission required for startForeground() on API 28+. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Required for microphone foreground service on API 34+. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- Auto-granted normal permission required for set_alarm and set_timer intents. -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <!-- Auto-granted normal permission required to observe Bluetooth headset connections. -->

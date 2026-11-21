@@ -812,17 +812,17 @@ class AssistantService : Service() {
 
     private fun resolveModelsRoot(): File {
         val own = getExternalFilesDir(null)?.let { File(it, "models") }
-        if (own != null && own.exists() && own.listFiles()?.isNotEmpty() == true) return own
-
         val androidData = own?.parentFile?.parentFile?.parentFile
-        if (androidData != null) {
-            val original = File(androidData, "com.localvoice.assistant/files/models")
-            if (original.exists() && original.listFiles()?.isNotEmpty() == true) return original
-        }
-
+        val original = androidData?.let { File(it, "com.localvoice.assistant/files/models") }
         val internal = File(filesDir, "models")
-        if (internal.exists() && internal.listFiles()?.isNotEmpty() == true) return internal
-        return (own ?: internal).apply { mkdirs() }
+        val root = when {
+            own != null && own.exists() && own.listFiles()?.isNotEmpty() == true -> own
+            original != null && original.exists() && original.listFiles()?.isNotEmpty() == true -> original
+            internal.exists() && internal.listFiles()?.isNotEmpty() == true -> internal
+            else -> (own ?: internal).apply { mkdirs() }
+        }
+        listOf("llm", "vad", "stt", "tts").forEach { File(root, it).mkdirs() }
+        return root
     }
 
     private fun findDefaultGguf(dir: File): File? {

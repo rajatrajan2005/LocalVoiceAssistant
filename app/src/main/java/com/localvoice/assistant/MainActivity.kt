@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -161,7 +162,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         val intent = Intent(this, AssistantService::class.java)
-        startService(intent)
+        ContextCompat.startForegroundService(this, intent)
         bindService(intent, connection, Context.BIND_AUTO_CREATE)
     }
 
