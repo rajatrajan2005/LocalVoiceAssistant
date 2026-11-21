@@ -412,7 +412,7 @@ class AudioPipeline(
                     val timedOut = speechMs >= MAX_UTTERANCE_MS
                     val vadEndpoint = mode == CaptureMode.HANDS_FREE && !localVad.empty() &&
                         speechMs >= MIN_HANDS_FREE_UTTERANCE_MS
-                    val stuckEndpoint = localVad.empty() && !speechNow &&
+                    val stuckEndpoint = mode == CaptureMode.HANDS_FREE && localVad.empty() && !speechNow &&
                         SystemClock.elapsedRealtime() - lastSpeechDetectedMs > 650L
                     val manualDone = mode == CaptureMode.MANUAL && manualFinishRequested.getAndSet(false)
 
