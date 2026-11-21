@@ -147,6 +147,7 @@ class AssistantService : Service() {
             runCatching { Uri.parse(value) }.getOrNull()
         }
         createNotificationChannel()
+        promoteToMicrophoneForeground()
         toolExecutor = ToolExecutor(this)
 
         ttsPlayer = TtsPlayer(
@@ -709,10 +710,14 @@ class AssistantService : Service() {
 
     private fun resolveModelsRoot(): File {
         val ext = getExternalFilesDir(null)?.let { File(it, "models") }
-        if (ext != null && ext.exists()) return ext
         val internal = File(filesDir, "models")
-        if (internal.exists()) return internal
-        return (ext ?: internal).apply { mkdirs() }
+        val root = when {
+            ext != null && ext.exists() -> ext
+            internal.exists() -> internal
+            else -> (ext ?: internal).apply { mkdirs() }
+        }
+        listOf("llm", "vad", "stt", "tts").forEach { File(root, it).mkdirs() }
+        return root
     }
 
     private fun findDefaultGguf(dir: File): File? {
