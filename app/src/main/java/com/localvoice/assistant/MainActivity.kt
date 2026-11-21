@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,6 +43,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -307,6 +310,11 @@ private fun AssistantScreen(
                 }
                 Text(badge, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
 
+                AudioWaveform(
+                    levels = state.waveform,
+                    active = state.listeningState != ListeningState.IDLE,
+                )
+
                 if (state.partialTranscript.isNotEmpty()) {
                     Text("Live STT: ${state.partialTranscript}", style = MaterialTheme.typography.bodySmall)
                 }
@@ -363,6 +371,35 @@ private fun AssistantScreen(
             },
         ) {
             Text(buttonLabel, style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+@Composable
+private fun AudioWaveform(levels: List<Float>, active: Boolean) {
+    val color = if (active) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f)
+    }
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp),
+    ) {
+        val count = levels.size.coerceAtLeast(1)
+        val step = size.width / count
+        levels.forEachIndexed { index, rawLevel ->
+            val level = rawLevel.coerceIn(0f, 1f)
+            val barHeight = (0.06f + level * 0.94f) * size.height
+            val x = index * step + step / 2f
+            drawLine(
+                color = color,
+                start = Offset(x, (size.height - barHeight) / 2f),
+                end = Offset(x, (size.height + barHeight) / 2f),
+                strokeWidth = (step * 0.55f).coerceAtLeast(1f),
+                cap = StrokeCap.Round,
+            )
         }
     }
 }

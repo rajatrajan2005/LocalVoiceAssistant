@@ -57,6 +57,7 @@ class AudioPipeline(
     private val onPartialTranscript: (String) -> Unit,
     private val onFinalTranscript: (text: String, sttLatencyMs: Long) -> Unit,
     private val onBargeIn: () -> Unit,
+    private val onAudioLevel: (Float) -> Unit,
 ) {
     companion object {
         const val SAMPLE_RATE = 16_000
@@ -296,6 +297,7 @@ class AudioPipeline(
         frameChannel: Channel<FloatArray>,
     ) {
         val pcm = ShortArray(vadFrameSamples)
+        var levelFrame = 0
         try {
             record.startRecording()
             while (running.get()) {
@@ -303,6 +305,9 @@ class AudioPipeline(
                 if (read > 0) {
                     val floats = FloatArray(read) { pcm[it] / 32768.0f }
                     frameChannel.trySend(floats)
+                    if (levelFrame++ % 2 == 0) {
+                        onAudioLevel(frameRms(floats))
+                    }
                 }
             }
         } finally {
